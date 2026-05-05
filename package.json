@@ -1,0 +1,14 @@
+{
+	"name": "pi-currency",
+	"version": "1.0.0",
+	"description": "Convert USD cost display to any currency using real-time exchange rates",
+	"keywords": ["pi-package"],
+	"license": "MIT",
+	"pi": {
+		"extensions": ["./extensions"]
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-coding-agent": "*",
+		"@mariozechner/pi-tui": "*"
+	}
+}
