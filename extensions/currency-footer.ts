@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 
-interface CostUsage { input: number; output: number; cost: { total: number }; }
+interface CostUsage { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number }; }
 interface CostMsg { role: string; usage: CostUsage; }
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
@@ -96,25 +96,135 @@ export default async function (pi: ExtensionAPI) {
 				invalidate() { fmt.clear(); },
 				render(width: number): string[] {
 					try {
-						let inp = 0, out = 0, cost = 0;
-						for (const e of ctx.sessionManager.getBranch()) {
+						const dim = (s: string) => theme.fg("dim", s);
+
+						// --- PWD line: cwd (branch) • sessionName ---
+						let pwd = ctx.sessionManager.getCwd();
+						const home = process.env.HOME || process.env.USERPROFILE;
+						if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+						const branch = footerData.getGitBranch();
+						if (branch) pwd = `${pwd} (${branch})`;
+						const sessionName = ctx.sessionManager.getSessionName();
+						if (sessionName) pwd = `${pwd} • ${sessionName}`;
+						const pwdLine = truncateToWidth(dim(pwd), width, dim("..."));
+
+						// --- Cumulative token/cost stats from ALL entries ---
+						let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheWrite = 0, totalCost = 0;
+						for (const e of ctx.sessionManager.getEntries()) {
 							if (e.type === "message" && e.message.role === "assistant") {
 								const m = e.message as CostMsg;
-								inp += m.usage.input; out += m.usage.output; cost += m.usage.cost.total;
+								totalInput += m.usage.input;
+								totalOutput += m.usage.output;
+								totalCacheRead += m.usage.cacheRead ?? 0;
+								totalCacheWrite += m.usage.cacheWrite ?? 0;
+								totalCost += m.usage.cost.total;
 							}
 						}
-						const dim = (s: string) => theme.fg("dim", s);
-						const parts: string[] = [];
-						if (cost > 0) {
+
+						// --- Context usage ---
+						const contextUsage = ctx.getContextUsage();
+						const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 128000;
+						const contextPercent = contextUsage?.percent !== null && contextUsage?.percent !== undefined
+							? contextUsage.percent.toFixed(1)
+							: "?";
+
+						// --- Build stats left side ---
+						const statsParts: string[] = [];
+						if (totalInput) statsParts.push(`↑${fmtn(totalInput)}`);
+						if (totalOutput) statsParts.push(`↓${fmtn(totalOutput)}`);
+						if (totalCacheRead) statsParts.push(`R${fmtn(totalCacheRead)}`);
+						if (totalCacheWrite) statsParts.push(`W${fmtn(totalCacheWrite)}`);
+
+						// Cost: show USD + converted currencies
+						const costParts: string[] = [];
+						if (totalCost > 0) {
+							costParts.push(`$${totalCost.toFixed(3)}`);
 							for (const ccy of currencies) {
-								parts.push(ccy === "USD" ? `$${cost.toFixed(3)}` : rates[ccy] ? fmtc(cost * rates[ccy], ccy) : "");
+								if (ccy !== "USD" && rates[ccy]) costParts.push(fmtc(totalCost * rates[ccy], ccy));
 							}
 						}
-						const cw = ctx.model?.contextWindow ?? 128000;
-						const left = [dim(`↑${fmtn(inp)} ↓${fmtn(out)} R${fmtn(Math.max(0, cw - inp))}`), parts.length ? dim(parts.join(" ")) : "", dim(`${((inp / cw) * 100).toFixed(1)}%/${fmtn(cw)}`)].filter(Boolean).join(" ");
-						const right = [Object.values(footerData.getExtensionStatuses()).filter(Boolean).join(" "), "(auto)"].filter(Boolean).join(" ");
-						const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-						return [truncateToWidth(left + pad + right, width)];
+						if (costParts.length) statsParts.push(costParts.join(" "));
+
+						// Context %
+						const contextDisplay = contextPercent === "?"
+							? `?/${fmtn(contextWindow)} (auto)`
+							: `${contextPercent}%/${fmtn(contextWindow)} (auto)`;
+						const contextPercentVal = contextUsage?.percent ?? 0;
+						const contextStr = contextPercentVal > 90
+							? theme.fg("error", contextDisplay)
+							: contextPercentVal > 70
+								? theme.fg("warning", contextDisplay)
+								: contextDisplay;
+						statsParts.push(contextStr);
+
+						let statsLeft = statsParts.join(" ");
+						let statsLeftWidth = visibleWidth(statsLeft);
+						if (statsLeftWidth > width) {
+							statsLeft = truncateToWidth(statsLeft, width, "...");
+							statsLeftWidth = visibleWidth(statsLeft);
+						}
+
+						// --- Extract thinking level from branch entries ---
+						let thinkingLevel = "off";
+						for (const e of ctx.sessionManager.getBranch()) {
+							if (e.type === "thinking_level_change") {
+								thinkingLevel = e.thinkingLevel;
+							}
+						}
+
+						// --- Right side: model + thinking level ---
+						const modelName = ctx.model?.id || "no-model";
+						let rightSideWithoutProvider = modelName;
+						if (ctx.model?.reasoning) {
+							rightSideWithoutProvider = thinkingLevel === "off"
+								? `${modelName} • thinking off`
+								: `${modelName} • ${thinkingLevel}`;
+						}
+
+						let rightSide = rightSideWithoutProvider;
+						if (footerData.getAvailableProviderCount() > 1 && ctx.model) {
+							rightSide = `(${ctx.model!.provider}) ${rightSideWithoutProvider}`;
+							if (statsLeftWidth + 2 + visibleWidth(rightSide) > width) {
+								rightSide = rightSideWithoutProvider;
+							}
+						}
+
+						const minPadding = 2;
+						const rightSideWidth = visibleWidth(rightSide);
+						const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
+
+						let statsLine: string;
+						if (totalNeeded <= width) {
+							const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+							statsLine = statsLeft + padding + rightSide;
+						} else {
+							const availableForRight = width - statsLeftWidth - minPadding;
+							if (availableForRight > 0) {
+								const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
+								const pad = " ".repeat(Math.max(0, width - statsLeftWidth - visibleWidth(truncatedRight)));
+								statsLine = statsLeft + pad + truncatedRight;
+							} else {
+								statsLine = statsLeft;
+							}
+						}
+
+						// Dim each part separately (statsLeft may contain colored context %)
+						const dimStatsLeft = dim(statsLeft);
+						const remainder = statsLine.slice(statsLeft.length);
+						const dimRemainder = dim(remainder);
+
+						const lines = [pwdLine, dimStatsLeft + dimRemainder];
+
+						// --- Extension statuses ---
+						const extensionStatuses = footerData.getExtensionStatuses();
+						if (extensionStatuses.size > 0) {
+							const statusTexts = Array.from(extensionStatuses.entries())
+								.sort(([a], [b]) => a.localeCompare(b))
+								.map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
+							lines.push(truncateToWidth(statusTexts.join(" "), width, dim("...")));
+						}
+
+						return lines;
 					} catch { return []; }
 				},
 			};
