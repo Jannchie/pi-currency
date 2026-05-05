@@ -135,12 +135,11 @@ export default async function (pi: ExtensionAPI) {
 						if (totalCacheRead) statsParts.push(`R${fmtn(totalCacheRead)}`);
 						if (totalCacheWrite) statsParts.push(`W${fmtn(totalCacheWrite)}`);
 
-						// Cost: show USD + converted currencies
+						// Cost: show selected currencies only
 						const costParts: string[] = [];
 						if (totalCost > 0) {
-							costParts.push(`$${totalCost.toFixed(3)}`);
 							for (const ccy of currencies) {
-								if (ccy !== "USD" && rates[ccy]) costParts.push(fmtc(totalCost * rates[ccy], ccy));
+								ccy === "USD" ? costParts.push(`$${totalCost.toFixed(3)}`) : rates[ccy] ? costParts.push(fmtc(totalCost * rates[ccy], ccy)) : null;
 							}
 						}
 						if (costParts.length) statsParts.push(costParts.join(" "));
