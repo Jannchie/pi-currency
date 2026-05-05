@@ -1,292 +1,123 @@
-/**
- * pi-currency — Real-time currency conversion for the footer cost display.
- *
- * Replaces `$0.030` with converted amounts in one or more currencies.
- *
- * Commands:
- *   /currency             Cycle to next single currency in the common list
- *   /currency CNY         Show only CNY (hides USD)
- *   /currency USD,JPY     Show USD + JPY
- *   /currency CNY,JPY     Show CNY + JPY (no USD)
- */
-
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type {
-	ExtensionAPI,
-	AssistantMessage,
-	ExtensionCommandContext,
-} from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+
+interface CostUsage { input: number; output: number; cost: { total: number }; }
+interface CostMsg { role: string; usage: CostUsage; }
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
-// ── Persistence ──────────────────────────────────────────────────────
+const PREFS = join(homedir(), ".pi", "agent", ".currency-pref.json");
+const COMMON = ["USD", "CNY", "JPY", "EUR", "GBP", "KRW", "HKD", "TWD", "SGD", "AUD", "CAD"];
 
-const PREFS_FILE = join(homedir(), ".pi", "agent", ".currency-pref.json");
+let currencies: string[] = [];
+let rates: Record<string, number> = {};
+let lastFetch = 0;
 
-function loadPref(): string[] {
+function load(): string[] {
 	try {
-		if (existsSync(PREFS_FILE)) {
-			const raw = readFileSync(PREFS_FILE, "utf-8");
-			const data: unknown = JSON.parse(raw);
-			const arr: string[] = Array.isArray(data) ? data : [(data as Record<string, string>).currency];
-			const valid = arr.filter((c: string) => /^[A-Z]{3}$/.test(c));
-			if (valid.length > 0) return valid;
-		}
-	} catch {
-		/* corrupt file → fall through */
-	}
-	return ["CNY"];
+		if (!existsSync(PREFS)) return ["CNY"];
+		const raw = JSON.parse(readFileSync(PREFS, "utf-8"));
+		const arr: string[] = Array.isArray(raw) ? raw : [raw.currency];
+		return arr.filter((c) => /^[A-Z]{3}$/.test(c)) || ["CNY"];
+	} catch { return ["CNY"]; }
 }
 
-function savePref(currencies: string[]): void {
+function save(currencies: string[]) {
 	try {
 		const dir = join(homedir(), ".pi", "agent");
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-		writeFileSync(PREFS_FILE, JSON.stringify(currencies), "utf-8");
-	} catch {
-		/* best-effort */
-	}
+		writeFileSync(PREFS, JSON.stringify(currencies), "utf-8");
+	} catch { /* */ }
 }
 
-// ── Rate fetching ────────────────────────────────────────────────────
-
-let currencies = loadPref();
-let usdRates: Record<string, number> = {
-	CNY: 7.25, JPY: 151.5, EUR: 0.92, GBP: 0.79, KRW: 1350, HKD: 7.82,
-};
-let lastFetch = 0;
-const FETCH_INTERVAL = 30 * 60 * 1000; // 30 min
-
-const COMMON_CURRENCIES = [
-	"USD", "CNY", "JPY", "EUR", "GBP", "KRW", "HKD", "TWD", "SGD", "AUD", "CAD",
-];
-
-const formatterCache = new Map<string, Intl.NumberFormat>();
-
-function getFormatter(currency: string): Intl.NumberFormat {
-	let f = formatterCache.get(currency);
-	if (!f) {
-		f = new Intl.NumberFormat("en-US", {
-			style: "currency",
-			currency,
-			currencyDisplay: "symbol",
-		});
-		formatterCache.set(currency, f);
-	}
+const fmt = new Map<string, Intl.NumberFormat>();
+function fmtr(ccy: string) {
+	let f = fmt.get(ccy);
+	if (!f) { f = new Intl.NumberFormat("en-US", { style: "currency", currency: ccy, currencyDisplay: "symbol" }); fmt.set(ccy, f); }
 	return f;
 }
 
-async function refreshRates(): Promise<void> {
-	const now = Date.now();
-	if (now - lastFetch < FETCH_INTERVAL) return;
+async function refresh() {
+	if (Date.now() - lastFetch < 30 * 60 * 1000) return;
 	try {
-		const resp = await fetch("https://open.er-api.com/v6/latest/USD");
-		if (!resp.ok) return;
-		const data = (await resp.json()) as { rates: Record<string, number> };
-		usdRates = data.rates;
-		lastFetch = now;
-	} catch {
-		/* keep stale cache */
-	}
+		const r = await fetch("https://open.er-api.com/v6/latest/USD");
+		if (!r.ok) return;
+		rates = (await r.json()).rates;
+		lastFetch = Date.now();
+	} catch { /* */ }
 }
 
-// ── Formatting helpers ───────────────────────────────────────────────
-
-function fmtNum(n: number): string {
+function fmtn(n: number) {
 	if (n < 1000) return `${n}`;
 	if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
 	return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-function fmtCost(amount: number, currency: string): string {
+function fmtc(amt: number, ccy: string) {
 	try {
-		const f = getFormatter(currency);
-		if (amount > 0 && amount < 0.01) {
-			return new Intl.NumberFormat("en-US", {
-				style: "currency",
-				currency,
-				currencyDisplay: "symbol",
-				minimumSignificantDigits: 3,
-				maximumSignificantDigits: 3,
-			}).format(amount);
-		}
-		return f.format(amount);
-	} catch {
-		return `${currency} ${amount.toFixed(4)}`;
-	}
+		const f = fmtr(ccy);
+		if (amt > 0 && amt < 0.01) return new Intl.NumberFormat("en-US", { style: "currency", currency: ccy, currencyDisplay: "symbol", minimumSignificantDigits: 3, maximumSignificantDigits: 3 }).format(amt);
+		return f.format(amt);
+	} catch { return `${ccy} ${amt.toFixed(4)}`; }
 }
 
-// ── Extension ────────────────────────────────────────────────────────
-
 export default async function (pi: ExtensionAPI) {
-	await refreshRates();
-	setInterval(refreshRates, FETCH_INTERVAL);
+	currencies = load();
+	await refresh();
+	setInterval(refresh, 30 * 60 * 1000);
 
 	pi.registerCommand("currency", {
-		description: `Set footer cost currencies (current: ${currencies.join(",")})`,
+		description: `Footer cost currencies (${currencies.join(",")})`,
 		getArgumentCompletions: (prefix: string) => {
-			const up = prefix.toUpperCase();
-			const all = [
-				...COMMON_CURRENCIES,
-				...Object.keys(usdRates).filter(
-					(c) => c !== "USD" && !COMMON_CURRENCIES.includes(c),
-				),
-			];
-			const items = [...new Set(all)].map((c) => ({
-				value: c,
-				label: `${c} (${getFormatter(c).format(1)})`,
-			}));
-			const filtered = items.filter((i) => i.value.startsWith(up));
-			return filtered.length > 0 ? filtered : null;
+			const all = [...new Set([...COMMON, ...Object.keys(rates).filter((c) => c !== "USD")])];
+			const items = all.map((c) => ({ value: c, label: `${c} (${fmtr(c).format(1)})` }));
+			return items.filter((i) => i.value.startsWith(prefix.toUpperCase()));
 		},
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const raw = args.trim().toUpperCase();
-
 			if (!raw) {
-				if (currencies.length > 1) {
-					currencies = ["USD"];
-				} else {
-					const idx = COMMON_CURRENCIES.indexOf(currencies[0]);
-					currencies = [
-						COMMON_CURRENCIES[
-							(idx + 1) % COMMON_CURRENCIES.length
-						],
-					];
-				}
+				currencies = currencies.length > 1 ? ["USD"] : [COMMON[(COMMON.indexOf(currencies[0]) + 1) % COMMON.length]];
 			} else {
-				const codes = raw
-					.split(",")
-					.map((c: string) => c.trim())
-					.filter(Boolean);
-				const valid: string[] = [];
-				for (const code of codes) {
-					if (usdRates[code] || code === "USD" || code.length === 3) {
-						valid.push(code);
-					} else {
-						ctx.ui.notify(`Unknown currency: ${code}`, "error");
-						return;
-					}
-				}
+				const valid = raw.split(",").map((c) => c.trim()).filter((c) => rates[c] || c === "USD" || c.length === 3);
+				if (valid.length !== raw.split(",").filter(Boolean).length) { ctx.ui.notify("Invalid currency code", "error"); return; }
 				currencies = [...new Set(valid)];
 			}
-
-			savePref(currencies);
-			const joined = currencies.join(",");
-			ctx.ui.notify(
-				currencies.length === 1 && currencies[0] === "USD"
-					? "Footer cost: USD (no conversion)"
-					: `Footer cost: ${joined}`,
-				"info",
-			);
+			save(currencies);
+			ctx.ui.notify(currencies.length === 1 && currencies[0] === "USD" ? "USD (no conversion)" : `Cost: ${currencies.join(",")}`, "info");
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			const unsub = footerData.onBranchChange(() =>
-				tui.requestRender(),
-			);
-
+			const unsub = footerData.onBranchChange(() => tui.requestRender());
 			return {
 				dispose: unsub,
-				invalidate() {
-					formatterCache.clear();
-				},
+				invalidate() { fmt.clear(); },
 				render(width: number): string[] {
 					try {
-						let input = 0,
-							output = 0,
-							cost = 0;
+						let inp = 0, out = 0, cost = 0;
 						for (const e of ctx.sessionManager.getBranch()) {
-							if (
-								e.type === "message" &&
-								e.message.role === "assistant"
-							) {
-								const m = e.message as AssistantMessage;
-								input += m.usage.input;
-								output += m.usage.output;
-								cost += m.usage.cost.total;
+							if (e.type === "message" && e.message.role === "assistant") {
+								const m = e.message as CostMsg;
+								inp += m.usage.input; out += m.usage.output; cost += m.usage.cost.total;
 							}
 						}
-
-						// ── Cost part ──────────────────────────────────
+						const dim = (s: string) => theme.fg("dim", s);
 						const parts: string[] = [];
 						if (cost > 0) {
 							for (const ccy of currencies) {
-								if (ccy === "USD") {
-									parts.push(`$${cost.toFixed(3)}`);
-								} else {
-									const rate = usdRates[ccy];
-									if (rate)
-										parts.push(
-											fmtCost(cost * rate, ccy),
-										);
-								}
+								parts.push(ccy === "USD" ? `$${cost.toFixed(3)}` : rates[ccy] ? fmtc(cost * rates[ccy], ccy) : "");
 							}
 						}
-						const costPart =
-							parts.length > 0
-								? theme.fg("dim", parts.join(" "))
-								: "";
-
-						// ── Token stats ────────────────────────────────
-						const ctxWindow =
-							ctx.model?.contextWindow ?? 128000;
-						const ctxPct =
-							ctxWindow > 0
-								? ((input / ctxWindow) * 100).toFixed(1)
-								: "0.0";
-						const remaining = Math.max(0, ctxWindow - input);
-
-						const tokensPart = theme.fg(
-							"dim",
-							`↑${fmtNum(input)} ↓${fmtNum(output)} R${fmtNum(remaining)}`,
-						);
-						const ctxPart = theme.fg(
-							"dim",
-							`${ctxPct}%/${fmtNum(ctxWindow)}`,
-						);
-
-						// ── Status & mode ──────────────────────────────
-						const statuses = footerData.getExtensionStatuses();
-						const statusStr = Object.values(statuses)
-							.filter(Boolean)
-							.join(" ");
-						const statusPart = statusStr
-							? theme.fg("dim", statusStr)
-							: "";
-						const mode = "(auto)";
-
-						const leftStr = [tokensPart, costPart, ctxPart]
-							.filter(Boolean)
-							.join(" ");
-						const rightStr = [statusPart, mode]
-							.filter(Boolean)
-							.join(" ");
-
-						const pad = " ".repeat(
-							Math.max(
-								1,
-								width -
-									visibleWidth(leftStr) -
-									visibleWidth(rightStr),
-							),
-						);
-
-						return [
-							truncateToWidth(leftStr + pad + rightStr, width),
-						];
-					} catch {
-						return [];
-					}
+						const cw = ctx.model?.contextWindow ?? 128000;
+						const left = [dim(`↑${fmtn(inp)} ↓${fmtn(out)} R${fmtn(Math.max(0, cw - inp))}`), parts.length ? dim(parts.join(" ")) : "", dim(`${((inp / cw) * 100).toFixed(1)}%/${fmtn(cw)}`)].filter(Boolean).join(" ");
+						const right = [Object.values(footerData.getExtensionStatuses()).filter(Boolean).join(" "), "(auto)"].filter(Boolean).join(" ");
+						const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
+						return [truncateToWidth(left + pad + right, width)];
+					} catch { return []; }
 				},
 			};
 		});
-
-		ctx.ui.notify(
-			`pi-currency loaded: ${currencies.join(",")}`,
-			"info",
-		);
 	});
 }
