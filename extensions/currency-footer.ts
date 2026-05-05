@@ -5,15 +5,19 @@
  *
  * Commands:
  *   /currency             Cycle to next single currency in the common list
- *   /currency CNY         Single currency (shows USD + converted)
- *   /currency USD,JPY     Multiple currencies (USD + converted JPY)
- *   /currency CNY,JPY     Multiple currencies without USD
+ *   /currency CNY         Show only CNY (hides USD)
+ *   /currency USD,JPY     Show USD + JPY
+ *   /currency CNY,JPY     Show CNY + JPY (no USD)
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, AssistantMessage } from "@mariozechner/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	AssistantMessage,
+	ExtensionCommandContext,
+} from "@mariozechner/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 // ── Persistence ──────────────────────────────────────────────────────
@@ -24,8 +28,8 @@ function loadPref(): string[] {
 	try {
 		if (existsSync(PREFS_FILE)) {
 			const raw = readFileSync(PREFS_FILE, "utf-8");
-			const data = JSON.parse(raw);
-			const arr: string[] = Array.isArray(data) ? data : [data.currency];
+			const data: unknown = JSON.parse(raw);
+			const arr: string[] = Array.isArray(data) ? data : [(data as Record<string, string>).currency];
 			const valid = arr.filter((c: string) => /^[A-Z]{3}$/.test(c));
 			if (valid.length > 0) return valid;
 		}
@@ -113,96 +117,6 @@ function fmtCost(amount: number, currency: string): string {
 	}
 }
 
-// ── Shared footer factory (used for every session) ───────────────────
-
-function createFooter(
-	theme: ReturnType<Parameters<Parameters<ExtensionAPI["on"]>[1]>[1]>,
-	footerData: ReturnType<Parameters<Parameters<ExtensionAPI["on"]>[1]>[1]>,
-	ctx: { sessionManager: { getBranch: () => { type: string; message: { role: string; usage: { input: number; output: number; cost: { total: number } } } }[] }; model?: { contextWindow?: number; id?: string } },
-) {
-	return {
-		dispose: () => {},
-		invalidate() {
-			formatterCache.clear();
-		},
-		render(width: number): string[] {
-			try {
-				let input = 0,
-					output = 0,
-					cost = 0;
-				for (const e of ctx.sessionManager.getBranch()) {
-					if (e.type === "message" && e.message.role === "assistant") {
-						const m = e.message as AssistantMessage;
-						input += m.usage.input;
-						output += m.usage.output;
-						cost += m.usage.cost.total;
-					}
-				}
-
-				// ── Cost part ──────────────────────────────────
-				const parts: string[] = [];
-				if (cost > 0) {
-					for (const ccy of currencies) {
-						if (ccy === "USD") {
-							parts.push(`$${cost.toFixed(3)}`);
-						} else {
-							const rate = usdRates[ccy];
-							if (rate) parts.push(fmtCost(cost * rate, ccy));
-						}
-					}
-				}
-				const costPart =
-					parts.length > 0 ? theme.fg("dim", parts.join(" ")) : "";
-
-				// ── Token stats ────────────────────────────────
-				const ctxWindow = ctx.model?.contextWindow ?? 128000;
-				const ctxPct =
-					ctxWindow > 0
-						? ((input / ctxWindow) * 100).toFixed(1)
-						: "0.0";
-				const remaining = Math.max(0, ctxWindow - input);
-
-				const tokensPart = theme.fg(
-					"dim",
-					`↑${fmtNum(input)} ↓${fmtNum(output)} R${fmtNum(remaining)}`,
-				);
-				const ctxPart = theme.fg(
-					"dim",
-					`${ctxPct}%/${fmtNum(ctxWindow)}`,
-				);
-
-				// ── Status & mode ──────────────────────────────
-				const statuses = footerData.getExtensionStatuses();
-				const statusStr = Object.values(statuses)
-					.filter(Boolean)
-					.join(" ");
-				const statusPart = statusStr
-					? theme.fg("dim", statusStr)
-					: "";
-				const mode = "(auto)";
-
-				const leftStr = [tokensPart, costPart, ctxPart]
-					.filter(Boolean)
-					.join(" ");
-				const rightStr = [statusPart, mode]
-					.filter(Boolean)
-					.join(" ");
-
-				const pad = " ".repeat(
-					Math.max(
-						1,
-						width - visibleWidth(leftStr) - visibleWidth(rightStr),
-					),
-				);
-
-				return [truncateToWidth(leftStr + pad + rightStr, width)];
-			} catch {
-				return [];
-			}
-		},
-	};
-}
-
 // ── Extension ────────────────────────────────────────────────────────
 
 export default async function (pi: ExtensionAPI) {
@@ -226,7 +140,7 @@ export default async function (pi: ExtensionAPI) {
 			const filtered = items.filter((i) => i.value.startsWith(up));
 			return filtered.length > 0 ? filtered : null;
 		},
-		handler: async (args, ctx) => {
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const raw = args.trim().toUpperCase();
 
 			if (!raw) {
@@ -243,7 +157,7 @@ export default async function (pi: ExtensionAPI) {
 			} else {
 				const codes = raw
 					.split(",")
-					.map((c) => c.trim())
+					.map((c: string) => c.trim())
 					.filter(Boolean);
 				const valid: string[] = [];
 				for (const code of codes) {
@@ -273,10 +187,100 @@ export default async function (pi: ExtensionAPI) {
 			const unsub = footerData.onBranchChange(() =>
 				tui.requestRender(),
 			);
-			const footer = createFooter(theme, footerData, ctx);
+
 			return {
-				...footer,
 				dispose: unsub,
+				invalidate() {
+					formatterCache.clear();
+				},
+				render(width: number): string[] {
+					try {
+						let input = 0,
+							output = 0,
+							cost = 0;
+						for (const e of ctx.sessionManager.getBranch()) {
+							if (
+								e.type === "message" &&
+								e.message.role === "assistant"
+							) {
+								const m = e.message as AssistantMessage;
+								input += m.usage.input;
+								output += m.usage.output;
+								cost += m.usage.cost.total;
+							}
+						}
+
+						// ── Cost part ──────────────────────────────────
+						const parts: string[] = [];
+						if (cost > 0) {
+							for (const ccy of currencies) {
+								if (ccy === "USD") {
+									parts.push(`$${cost.toFixed(3)}`);
+								} else {
+									const rate = usdRates[ccy];
+									if (rate)
+										parts.push(
+											fmtCost(cost * rate, ccy),
+										);
+								}
+							}
+						}
+						const costPart =
+							parts.length > 0
+								? theme.fg("dim", parts.join(" "))
+								: "";
+
+						// ── Token stats ────────────────────────────────
+						const ctxWindow =
+							ctx.model?.contextWindow ?? 128000;
+						const ctxPct =
+							ctxWindow > 0
+								? ((input / ctxWindow) * 100).toFixed(1)
+								: "0.0";
+						const remaining = Math.max(0, ctxWindow - input);
+
+						const tokensPart = theme.fg(
+							"dim",
+							`↑${fmtNum(input)} ↓${fmtNum(output)} R${fmtNum(remaining)}`,
+						);
+						const ctxPart = theme.fg(
+							"dim",
+							`${ctxPct}%/${fmtNum(ctxWindow)}`,
+						);
+
+						// ── Status & mode ──────────────────────────────
+						const statuses = footerData.getExtensionStatuses();
+						const statusStr = Object.values(statuses)
+							.filter(Boolean)
+							.join(" ");
+						const statusPart = statusStr
+							? theme.fg("dim", statusStr)
+							: "";
+						const mode = "(auto)";
+
+						const leftStr = [tokensPart, costPart, ctxPart]
+							.filter(Boolean)
+							.join(" ");
+						const rightStr = [statusPart, mode]
+							.filter(Boolean)
+							.join(" ");
+
+						const pad = " ".repeat(
+							Math.max(
+								1,
+								width -
+									visibleWidth(leftStr) -
+									visibleWidth(rightStr),
+							),
+						);
+
+						return [
+							truncateToWidth(leftStr + pad + rightStr, width),
+						];
+					} catch {
+						return [];
+					}
+				},
 			};
 		});
 
