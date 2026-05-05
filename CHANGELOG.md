@@ -1,3 +1,11 @@
+## v1.1.1
+
+[v1.1.0...v1.1.1](https://github.com/Jannchie/pi-currency/compare/v1.1.0...v1.1.1)
+
+### :adhesive_bandage: Fixes
+
+- **currency-footer**: show selected currencies only - By [Jannchie](mailto:jannchie@gmail.com) in [72bcbef](https://github.com/Jannchie/pi-currency/commit/72bcbef)
+
 ## v1.1.0
 
 [v1.0.1...v1.1.0](https://github.com/Jannchie/pi-currency/compare/v1.0.1...v1.1.0)
