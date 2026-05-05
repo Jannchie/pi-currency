@@ -6,13 +6,7 @@ from USD to any currency using real-time exchange rates.
 ## Install
 
 ```bash
-pi install ~/pi-currency
-```
-
-Or try without installing:
-
-```bash
-pi -e ~/pi-currency
+pi install npm:pi-currency
 ```
 
 ## Usage
@@ -34,12 +28,12 @@ to (for example):
 | Command | Effect |
 |---------|--------|
 | `/currency` | Cycle to next single currency in the common list |
-| `/currency CNY` | Show USD + converted CNY |
-| `/currency JPY` | Show USD + converted JPY |
+| `/currency CNY` | Show only CNY (hides USD) |
+| `/currency JPY` | Show only JPY (hides USD) |
 | `/currency USD` | Back to plain USD (no conversion) |
-| `/currency CNY,JPY` | Show both, hide USD |
-| `/currency USD,CNY,JPY` | Show USD + both conversions |
-| `/currency KRW` | Show USD + converted KRW |
+| `/currency USD,CNY` | Show USD + CNY |
+| `/currency CNY,JPY` | Show CNY + JPY (no USD) |
+| `/currency USD,CNY,JPY` | Show USD + CNY + JPY |
 
 Supports any [ISO 4217](https://en.wikipedia.org/wiki/ISO_4217) currency code.
 
