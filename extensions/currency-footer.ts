@@ -147,8 +147,8 @@ export default async function (pi: ExtensionAPI) {
 
 						// Context %
 						const contextDisplay = contextPercent === "?"
-							? `?/${fmtn(contextWindow)} (auto)`
-							: `${contextPercent}%/${fmtn(contextWindow)} (auto)`;
+							? `?/${fmtn(contextWindow)}`
+							: `${contextPercent}%/${fmtn(contextWindow)}`;
 						const contextPercentVal = contextUsage?.percent ?? 0;
 						const contextStr = contextPercentVal > 90
 							? theme.fg("error", contextDisplay)
